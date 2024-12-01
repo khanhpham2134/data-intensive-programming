@@ -977,6 +977,233 @@ for color, pixel_count in zip(redImageNames, redPixelAmounts):
 
 # COMMAND ----------
 
-# the structure of the code and the output format is left to the group's discretion
-# the example output notebook can be used as inspiration
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import RandomForestClassifier, DecisionTreeClassifier
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+from pyspark.sql.functions import col, from_unixtime, hour, month, dayofweek, lit
+from pyspark.sql.types import BooleanType, DoubleType
+from pyspark.sql import Row
+import numpy as np
 
+# COMMAND ----------
+
+# Read data from a parquet file
+df = spark.read.parquet("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/energy/procem_13m.parquet")
+
+# Extract month and hour from the timestamp
+df = df.withColumn("month", month(from_unixtime(col("time"))))
+df = df.withColumn("hour", hour(from_unixtime(col("time"))))
+
+# Remove rows with missing values
+df = df.dropna()
+# Select relevant columns for different predictions
+# 1
+data_month_weather = df.select("temperature", "humidity", "wind_speed", "month")
+# 2
+data_month_power = df.select("power_tenants", "power_maintenance", "power_solar_panels", "month")
+# 3
+data_month_all = df.select("temperature", "humidity", "wind_speed", "power_tenants", "power_maintenance", "power_solar_panels", "electricity_price", "month")
+# 4
+data_hour_weather = df.select("temperature", "humidity", "wind_speed", "hour")
+# 5
+data_hour_power = df.select("power_tenants", "power_maintenance", "power_solar_panels", "hour")
+# 6
+data_hour_all = df.select("temperature", "humidity", "wind_speed", "power_tenants", "power_maintenance", "power_solar_panels", "electricity_price", "hour")
+
+# Assemble features for different predictions
+assembler_weather = VectorAssembler(inputCols=["temperature", "humidity", "wind_speed"], outputCol="features")
+assembler_power = VectorAssembler(inputCols=["power_tenants", "power_maintenance", "power_solar_panels"], outputCol="features")
+assembler_all = VectorAssembler(inputCols=["temperature", "humidity", "wind_speed", "power_tenants", "power_maintenance", "power_solar_panels", "electricity_price"], outputCol="features")
+
+data_month_weather = assembler_weather.transform(data_month_weather).select("features", "month")
+data_month_power = assembler_power.transform(data_month_power).select("features", "month")
+data_month_all = assembler_all.transform(data_month_all).select("features", "month")
+data_hour_weather = assembler_weather.transform(data_hour_weather).select("features", "hour")
+data_hour_power = assembler_power.transform(data_hour_power).select("features", "hour")
+data_hour_all = assembler_all.transform(data_hour_all).select("features", "hour")
+
+# Split data into training and test sets
+train_data_month_weather, test_data_month_weather = data_month_weather.randomSplit([0.8, 0.2], seed=42)
+train_data_month_power, test_data_month_power = data_month_power.randomSplit([0.8, 0.2], seed=42)
+train_data_month_all, test_data_month_all = data_month_all.randomSplit([0.8, 0.2], seed=42)
+train_data_hour_weather, test_data_hour_weather = data_hour_weather.randomSplit([0.8, 0.2], seed=42)
+train_data_hour_power, test_data_hour_power = data_hour_power.randomSplit([0.8, 0.2], seed=42)
+train_data_hour_all, test_data_hour_all = data_hour_all.randomSplit([0.8, 0.2], seed=42)
+
+# Define the model
+rf_month = RandomForestClassifier(labelCol="month", featuresCol="features", numTrees=100)
+rf_hour = RandomForestClassifier(labelCol="hour", featuresCol="features", numTrees=100)
+
+# Train the models
+model_month_weather = rf_month.fit(train_data_month_weather)
+model_month_power = rf_month.fit(train_data_month_power)
+model_month_all = rf_month.fit(train_data_month_all)
+model_hour_weather = rf_hour.fit(train_data_hour_weather)
+model_hour_power = rf_hour.fit(train_data_hour_power)
+model_hour_all = rf_hour.fit(train_data_hour_all)
+
+# Make predictions
+predictions_month_weather = model_month_weather.transform(test_data_month_weather)
+predictions_month_power = model_month_power.transform(test_data_month_power)
+predictions_month_all = model_month_all.transform(test_data_month_all)
+predictions_hour_weather = model_hour_weather.transform(test_data_hour_weather)
+predictions_hour_power = model_hour_power.transform(test_data_hour_power)
+predictions_hour_all = model_hour_all.transform(test_data_hour_all)
+
+# Evaluate the models
+evaluator_month = MulticlassClassificationEvaluator(labelCol="month", predictionCol="prediction", metricName="accuracy")
+evaluator_hour = MulticlassClassificationEvaluator(labelCol="hour", predictionCol="prediction", metricName="accuracy")
+
+accuracy_month_weather = evaluator_month.evaluate(predictions_month_weather)
+accuracy_month_power = evaluator_month.evaluate(predictions_month_power)
+accuracy_month_all = evaluator_month.evaluate(predictions_month_all)
+accuracy_hour_weather = evaluator_hour.evaluate(predictions_hour_weather)
+accuracy_hour_power = evaluator_hour.evaluate(predictions_hour_power)
+accuracy_hour_all = evaluator_hour.evaluate(predictions_hour_all)
+
+# Display results
+print(f"Accuracy on test data (month prediction using weather measurements): {accuracy_month_weather}")
+print(f"Accuracy on test data (month prediction using power measurements): {accuracy_month_power}")
+print(f"Accuracy on test data (month prediction using all measurements): {accuracy_month_all}")
+print(f"Accuracy on test data (hour prediction using weather measurements): {accuracy_hour_weather}")
+print(f"Accuracy on test data (hour prediction using power measurements): {accuracy_hour_power}")
+print(f"Accuracy on test data (hour prediction using all measurements): {accuracy_hour_all}")
+
+# COMMAND ----------
+
+# Define UDFs to check if predictions are within 1 or 2 units away, considering cyclic nature
+def within_range(label, prediction, total_no_value, range_value):
+    return (abs(label - prediction) <= 1) or (abs(label - prediction) >= total_no_value - range_value)
+
+def correct_probability(probability, label):
+    return float(probability[label])
+
+within_range_udf = udf(lambda label, prediction, total_no_value, range_value: within_range(label, prediction, total_no_value, range_value), BooleanType())
+correct_probability_udf = udf(correct_probability, DoubleType())
+
+def custom_evaluate(predictions, label_col, total_no_value):
+    # Calculate the percentage of correct predictions
+    correct_predictions = predictions.filter(col(label_col) == col("prediction")).count()
+    total_predictions = predictions.count()
+    accuracy = correct_predictions / total_predictions
+
+    # Add columns to the predictions DataFrame to check if predictions are within range and calculate the percentages of predictions within a range
+    within_range_percentages = []
+    for range_value in [1, 2]:
+        col_name = f"within_{range_value}_away"
+        predictions = predictions.withColumn(
+            col_name, within_range_udf(col(label_col), col("prediction"), lit(total_no_value), lit(range_value))
+        )
+        within_range_count = predictions.filter(col(col_name)).count()
+        within_range_percentage = within_range_count / total_predictions
+        within_range_percentages.append(within_range_percentage)
+
+    # Calculate the average probability the model predicts for the correct value
+    predictions = predictions.withColumn("correct_probability", correct_probability_udf(col("probability"), col(label_col)))
+    average_correct_probability = predictions.select("correct_probability").agg({"correct_probability": "avg"}).collect()[0][0]
+
+    return accuracy, within_range_percentages[0], within_range_percentages[1], average_correct_probability
+
+# COMMAND ----------
+
+evaluation_configs = [
+    # Month predictions
+    ("RandomForest", "month", 12, predictions_month_weather, "temperat,humidity,wind_spe"),
+    ("RandomForest", "month", 12, predictions_month_power, "power_te,power_ma,power_so"),
+    ("RandomForest", "month", 12, predictions_month_all, "temperat,humidity,wind_spe,power_te,power_ma,power_so,electric"),
+    
+    # Hour predictions
+    ("RandomForest", "hour", 24, predictions_hour_weather, "temperat,humidity,wind_spe"),
+    ("RandomForest", "hour", 24, predictions_hour_power, "power_te,power_ma,power_so"),
+    ("RandomForest", "hour", 24, predictions_hour_all, "temperat,humidity,wind_spe,power_te,power_ma,power_so,electric"),
+]
+
+# Evaluate models using a loop
+results = [
+    Row(
+        classifier=classifier,
+        input=features,
+        label=label,
+        correct=float(accuracy),
+        within_one=float(within_one),
+        within_two=float(within_two),
+        avg_prob=float(avg_prob),
+    )
+    for classifier, label, total_no_value, predictions, features in evaluation_configs
+    for accuracy, within_one, within_two, avg_prob in [custom_evaluate(predictions, label, total_no_value)]
+]
+
+# Create a DataFrame from the results
+accuracy_df = spark.createDataFrame(results)
+
+# Display the DataFrame
+display(accuracy_df)
+
+# COMMAND ----------
+
+custom_results = []
+# Add day of the week column to the DataFrame
+df = df.withColumn("day_of_week", dayofweek(from_unixtime(col("time"))))
+
+# Select features and label
+data_weather_day_of_week = df.select("temperature", "humidity", "wind_speed", "day_of_week")
+data_power_day_of_week = df.select("power_tenants", "power_maintenance", "power_solar_panels", "electricity_price", "day_of_week")
+
+assembler_power_and_price = VectorAssembler(inputCols=["power_tenants", "power_maintenance", "power_solar_panels", "electricity_price"], outputCol="features")
+
+data_weather_day_of_week = assembler_weather.transform(data_weather_day_of_week).select("features", "day_of_week")
+data_power_day_of_week = assembler_power_and_price.transform(data_power_day_of_week).select("features", "day_of_week")
+
+
+# Split the data into training and test sets
+train_data_day_of_week_weather, test_data_day_of_week_weather = data_weather_day_of_week.randomSplit([0.8, 0.2], seed=42)
+train_data_day_of_week_power_and_price, test_data_day_of_week_power_and_price = data_power_day_of_week.randomSplit([0.8, 0.2], seed=42)
+
+# Initialize classifiers
+rf_classifier_day_of_week = RandomForestClassifier(labelCol="day_of_week", featuresCol="features", numTrees=100)
+dt_classifier_day_of_week = DecisionTreeClassifier(labelCol="day_of_week", featuresCol="features")
+
+# Train the models
+rf_model_day_of_week_weather = rf_classifier_day_of_week.fit(train_data_day_of_week_weather)
+dt_model_day_of_week_weather = dt_classifier_day_of_week.fit(train_data_day_of_week_weather)
+rf_model_day_of_week_power_and_price = rf_classifier_day_of_week.fit(train_data_day_of_week_weather)
+dt_model_day_of_week_power_and_price = dt_classifier_day_of_week.fit(train_data_day_of_week_weather)
+
+# Make predictions
+rf_predictions_day_of_week_weather = rf_model_day_of_week_weather.transform(test_data_day_of_week_weather)
+dt_predictions_day_of_week_weather = dt_model_day_of_week_weather.transform(test_data_day_of_week_weather)
+rf_predictions_day_of_week_power_and_price = rf_model_day_of_week_power_and_price.transform(test_data_day_of_week_power_and_price)
+dt_predictions_day_of_week_power_and_price = dt_model_day_of_week_power_and_price.transform(test_data_day_of_week_power_and_price)
+
+# Custom evaluate the models
+accuracy, within_one, within_two, avg_prob = custom_evaluate(rf_predictions_day_of_week_weather, "day_of_week", 7)
+custom_results.append(Row(classifier="RandomForest", input="temperat,humidity,wind_spe", label="day_of_week", correct=float(accuracy), within_one=float(within_one), within_two=float(within_two), avg_prob=float(avg_prob)))
+
+accuracy, within_one, within_two, avg_prob = custom_evaluate(dt_predictions_day_of_week_weather, "day_of_week", 7)
+custom_results.append(Row(classifier="DecisionTree", input="temperat,humidity,wind_spe", label="day_of_week", correct=float(accuracy), within_one=float(within_one), within_two=float(within_two), avg_prob=float(avg_prob)))
+
+accuracy, within_one, within_two, avg_prob = custom_evaluate(rf_predictions_day_of_week_power_and_price, "day_of_week", 7)
+custom_results.append(Row(classifier="RandomForest", input="power_tenants,power_maintenance,power_solar_panels,electricity_price", label="day_of_week", correct=float(accuracy), within_one=float(within_one), within_two=float(within_two), avg_prob=float(avg_prob)))
+
+accuracy, within_one, within_two, avg_prob = custom_evaluate(dt_predictions_day_of_week_power_and_price, "day_of_week", 7)
+custom_results.append(Row(classifier="DecisionTree", input="power_tenants,power_maintenance,power_solar_panels,electricity_price", label="day_of_week", correct=float(accuracy), within_one=float(within_one), within_two=float(within_two), avg_prob=float(avg_prob)))
+
+# Evaluate the model using built-in evaluator
+evaluator = MulticlassClassificationEvaluator(labelCol="day_of_week", predictionCol="prediction", metricName="accuracy")
+
+rf_accuracy_weather = evaluator.evaluate(rf_predictions_day_of_week_weather)
+
+dt_accuracy_weather = evaluator.evaluate(dt_predictions_day_of_week_weather)
+
+rf_accuracy_power_and_price = evaluator.evaluate(rf_predictions_day_of_week_power_and_price)
+
+dt_accuracy_power_and_price = evaluator.evaluate(dt_predictions_day_of_week_power_and_price)
+
+print("RandomForest Accuracy: " + str(rf_accuracy_weather) + " " + str(rf_accuracy_power_and_price))
+print("DecisionTree Accuracy: " + str(dt_accuracy_weather) + " " + str(dt_accuracy_power_and_price))
+
+# Create a DataFrame from the results
+accuracy_df = spark.createDataFrame(custom_results)
+
+# Display the DataFrame
+display(accuracy_df)
