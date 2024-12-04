@@ -116,6 +116,7 @@ print(f"The number of titles with missing sales data for North America: {titlesW
 print("Sales data for the publisher:")
 bestNAPublisherSales.show()
 
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -165,28 +166,68 @@ bestNAPublisherSales.show()
 
 # COMMAND ----------
 
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, ArrayType
+
+# Define schema for eventDF
+event_schema = StructType([
+    StructField("competition", StringType(), True),
+    StructField("season", StringType(), True),
+    StructField("matchId", IntegerType(), True),
+    StructField("eventId", IntegerType(), True),
+    StructField("homeTeam", StringType(), True),
+    StructField("awayTeam", StringType(), True),
+    StructField("event", StringType(), True),
+    StructField("subEvent", StringType(), True),
+    StructField("eventTeam", StringType(), True),
+    StructField("eventPlayerId", IntegerType(), True),
+    StructField("eventPeriod", StringType(), True),
+    StructField("eventTime", DoubleType(), True),
+    StructField("tags", ArrayType(StringType()), True),
+    StructField("startPosition", StructType([
+        StructField("x", DoubleType(), True),
+        StructField("y", DoubleType(), True)
+    ]), True),
+    StructField("endPosition", StructType([
+        StructField("x", DoubleType(), True),
+        StructField("y", DoubleType(), True)
+    ]), True)
+])
+
 eventDF: DataFrame = spark.read  \
   .option("header", "true") \
   .option("sep", ",") \
-  .option("inferSchema", "true") \
+  .schema(event_schema) \
   .parquet("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/football/events.parquet")
 eventDF.printSchema()
+
+# Define schema for eventID2NameDF
+eventID2Name_schema = StructType([
+    StructField("event", IntegerType(), True),
+    StructField("subevent", IntegerType(), True),
+    StructField("event_label", StringType(), True),
+    StructField("subevent_label", StringType(), True)
+])
 
 eventID2NameDF: DataFrame = spark.read  \
   .option("header", "true") \
   .option("sep", ",") \
-  .option("inferSchema", "true") \
+  .schema(eventID2Name_schema) \
   .csv("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/football/metadata/eventid2name.csv")
 eventID2NameDF.printSchema()
-eventID2NameDF.show(10)
+
+# Define schema for tags2NameDF
+tags2Name_schema = StructType([
+    StructField("Tag", IntegerType(), True),
+    StructField("Label", StringType(), True),
+    StructField("Description", StringType(), True)
+])
 
 tags2NameDF: DataFrame = spark.read  \
   .option("header", "true") \
   .option("sep", ",") \
-  .option("inferSchema", "true") \
+  .schema(tags2Name_schema) \
   .csv("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/football/metadata/tags2name.csv")
 tags2NameDF.printSchema()
-tags2NameDF.show(10)
 
 row_count = eventDF.count()
 print(f"Number of rows in eventDF: {row_count}")
@@ -221,6 +262,7 @@ print(f"Number of rows in eventDF: {row_count}")
 
 # COMMAND ----------
 
+
 homeGoalsDF = eventDF.filter(
     (array_contains(col("tags"), "Accurate") & array_contains(col("tags"), "Goal") & (col("eventTeam") == col("homeTeam"))) |
     (array_contains(col("tags"), "Own goal") & (col("eventTeam") == col("awayTeam")))
@@ -249,6 +291,7 @@ print(f"Total number of matches: {total_matches}")
 print(f"Matches without any goals: {matches_without_goals}")
 print(f"Most goals in total in a single game: {most_goals_in_single_game}")
 print(f"Total amount of goals: {total_goals}")
+
 
 # COMMAND ----------
 
@@ -286,65 +329,93 @@ print(f"Total amount of goals: {total_goals}")
 
 # COMMAND ----------
 
-matchDF = matchDF.withColumn("homeTeamResult", when(col("homeTeamGoals") > col("awayTeamGoals"), "win")
-                                           .when(col("homeTeamGoals") < col("awayTeamGoals"), "loss")
-                                           .otherwise("draw")) \
-                 .withColumn("awayTeamResult", when(col("awayTeamGoals") > col("homeTeamGoals"), "win")
-                                           .when(col("awayTeamGoals") < col("homeTeamGoals"), "loss")
-                                           .otherwise("draw"))
+from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType, StringType
 
-matchDF = matchDF.withColumn("homeTeamPoints", when(col("homeTeamResult") == "win", 3)
-                                             .when(col("homeTeamResult") == "draw", 1)
-                                             .otherwise(0)) \
-                 .withColumn("awayTeamPoints", when(col("awayTeamResult") == "win", 3)
-                                             .when(col("awayTeamResult") == "draw", 1)
-                                             .otherwise(0))
+# Define lambda functions for results and points calculations
+def calculate_result(goals_for, goals_against):
+    if goals_for > goals_against:
+        return "win"
+    elif goals_for < goals_against:
+        return "loss"
+    else:
+        return "draw"
 
-homeStatsDF = matchDF.groupBy("competition", "season", "homeTeam").agg(
-    count("matchId").alias("games"),
-    sum(when(col("homeTeamResult") == "win", 1).otherwise(0)).alias("wins"),
-    sum(when(col("homeTeamResult") == "draw", 1).otherwise(0)).alias("draws"),
-    sum(when(col("homeTeamResult") == "loss", 1).otherwise(0)).alias("losses"),
-    sum("homeTeamGoals").alias("goalsScored"),
-    sum("awayTeamGoals").alias("goalsConceded"),
-    sum("homeTeamPoints").alias("points")
-).withColumnRenamed("homeTeam", "team")
+def calculate_points(result):
+    if result == "win":
+        return 3
+    elif result == "draw":
+        return 1
+    else:
+        return 0
 
-awayStatsDF = matchDF.groupBy("competition", "season", "awayTeam").agg(
-    count("matchId").alias("games"),
-    sum(when(col("awayTeamResult") == "win", 1).otherwise(0)).alias("wins"),
-    sum(when(col("awayTeamResult") == "draw", 1).otherwise(0)).alias("draws"),
-    sum(when(col("awayTeamResult") == "loss", 1).otherwise(0)).alias("losses"),
-    sum("awayTeamGoals").alias("goalsScored"),
-    sum("homeTeamGoals").alias("goalsConceded"),
-    sum("awayTeamPoints").alias("points")
-).withColumnRenamed("awayTeam", "team")
+# Register the lambda functions as UDFs
+result_udf = F.udf(calculate_result, StringType())
+points_udf = F.udf(calculate_points, IntegerType())
 
+# Apply result and points UDFs
+matchDF = matchDF.withColumn("homeTeamResult", result_udf(col("homeTeamGoals"), col("awayTeamGoals"))) \
+                 .withColumn("awayTeamResult", result_udf(col("awayTeamGoals"), col("homeTeamGoals"))) \
+                 .withColumn("homeTeamPoints", points_udf(col("homeTeamResult"))) \
+                 .withColumn("awayTeamPoints", points_udf(col("awayTeamResult")))
+
+# Define aggregation logic for stats
+def aggregate_team_stats(df, team_col, result_col, goals_for_col, goals_against_col, points_col):
+    return df.groupBy("competition", "season", team_col).agg(
+        F.count("matchId").alias("games"),
+        F.sum(F.when(col(result_col) == "win", 1).otherwise(0)).alias("wins"),
+        F.sum(F.when(col(result_col) == "draw", 1).otherwise(0)).alias("draws"),
+        F.sum(F.when(col(result_col) == "loss", 1).otherwise(0)).alias("losses"),
+        F.sum(col(goals_for_col)).alias("goalsScored"),
+        F.sum(col(goals_against_col)).alias("goalsConceded"),
+        F.sum(col(points_col)).alias("points")
+    ).withColumnRenamed(team_col, "team")
+
+# Compute home and away stats using the aggregation function
+homeStatsDF = aggregate_team_stats(matchDF, "homeTeam", "homeTeamResult", "homeTeamGoals", "awayTeamGoals", "homeTeamPoints")
+awayStatsDF = aggregate_team_stats(matchDF, "awayTeam", "awayTeamResult", "awayTeamGoals", "homeTeamGoals", "awayTeamPoints")
+
+# Combine home and away stats
 seasonDF = homeStatsDF.unionByName(awayStatsDF).groupBy("competition", "season", "team").agg(
-    sum("games").alias("games"),
-    sum("wins").alias("wins"),
-    sum("draws").alias("draws"),
-    sum("losses").alias("losses"),
-    sum("goalsScored").alias("goalsScored"),
-    sum("goalsConceded").alias("goalsConceded"),
-    sum("points").alias("points")
+    F.sum("games").alias("games"),
+    F.sum("wins").alias("wins"),
+    F.sum("draws").alias("draws"),
+    F.sum("losses").alias("losses"),
+    F.sum("goalsScored").alias("goalsScored"),
+    F.sum("goalsConceded").alias("goalsConceded"),
+    F.sum("points").alias("points")
 )
 
-display(seasonDF.filter(col("team").isin("Lille", "Getafe", "Torino", "Arsenal", "Schalke 04", "Burnley")))
+# Display filtered teams
+# filteredTeams = ["Lille", "Getafe", "Torino", "Arsenal", "Schalke 04", "Burnley"]
+# display(seasonDF.filter(col("team").isin(filteredTeams)))
 
-total_rows = seasonDF.count()
-teams_above_70_points = seasonDF.filter(col("points") > 70).count()
-lowest_points = seasonDF.agg(spark_min("points")).first()[0]
-total_points = seasonDF.agg(sum("points")).first()[0]
-total_goals_scored = seasonDF.agg(sum("goalsScored")).first()[0]
-total_goals_conceded = seasonDF.agg(sum("goalsConceded")).first()[0]
+# Avoid multiple actions by aggregating statistics in one step
+aggregated_stats = seasonDF.agg(
+    F.count("*").alias("total_rows"),
+    F.sum(F.when(col("points") > 70, 1).otherwise(0)).alias("teams_above_70_points"),
+    F.min("points").alias("lowest_points"),
+    F.sum("points").alias("total_points"),
+    F.sum("goalsScored").alias("total_goals_scored"),
+    F.sum("goalsConceded").alias("total_goals_conceded")
+).collect()[0]
 
+# Extract aggregated results
+total_rows = aggregated_stats["total_rows"]
+teams_above_70_points = aggregated_stats["teams_above_70_points"]
+lowest_points = aggregated_stats["lowest_points"]
+total_points = aggregated_stats["total_points"]
+total_goals_scored = aggregated_stats["total_goals_scored"]
+total_goals_conceded = aggregated_stats["total_goals_conceded"]
+
+# Print final statistics
 print(f"Total number of rows: {total_rows}")
 print(f"Teams with more than 70 points in a season: {teams_above_70_points}")
 print(f"Lowest amount points in a season: {lowest_points}")
 print(f"Total amount of points: {total_points}")
 print(f"Total amount of goals scored: {total_goals_scored}")
 print(f"Total amount of goals conceded: {total_goals_conceded}")
+
 
 # COMMAND ----------
 
@@ -449,6 +520,8 @@ matchPassDF = passEventsDF.groupBy("matchId","eventTeam", "competition", "season
      count("eventId").alias("totalPasses")
 ).withColumnRenamed("eventTeam", "team")
 
+# remove array_contains
+
 totalRows = matchPassDF.count()
 
 moreThan700TotalPasses = matchPassDF.filter(col("totalPasses") > 700).count()
@@ -459,7 +532,7 @@ print(f"Total number of rows: {totalRows}")
 print(f"Team-match pairs with more than 700 total passes: {moreThan700TotalPasses}")
 print(f"Team-match pairs with more than 600 successful passes: {moreThan600SuccessfulPasses}")
 
-display(matchPassDF)
+# display(matchPassDF)
 
 # COMMAND ----------
 
@@ -592,7 +665,7 @@ bestDF.show(10, False)
 # MAGIC
 # MAGIC For the basic tasks, we sat in a room and did all the tasks together. It took us around 4 hours to complete them.
 # MAGIC
-# MAGIC While doing the assignment, we used Databricks AI assistent to help us diagnose the errors and search for syntax.
+# MAGIC While doing the assignment, we used Databricks AI assistant to help us diagnose the errors and search for syntax.
 # MAGIC
 # MAGIC We did not work with any students outside our group.
 
