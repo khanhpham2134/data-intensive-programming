@@ -72,8 +72,9 @@ import re
 from typing import Dict, List, Tuple
 
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import round, year, sum, col, count, array_contains, max as spark_max, when, lit, min as spark_min, expr, concat, avg, row_number
+from pyspark.sql.functions import round, year, sum, col, count, array_contains, max, when, lit, min, expr, concat, avg, row_number, broadcast, concat_ws, ceil, explode
 from pyspark.sql.window import Window
+from pyspark.sql.types import StructType, StructField, StringType, DateType, DoubleType
 
 # COMMAND ----------
 
@@ -94,12 +95,28 @@ from pyspark.sql.window import Window
 
 # COMMAND ----------
 
+videoGameSales_schema = StructType([
+    StructField("title", StringType(), True),
+    StructField("publisher", StringType(), True),
+    StructField("developer", StringType(), True),
+    StructField("release_date", DateType(), True),
+    StructField("platform", StringType(), True),
+    StructField("total_sales", DoubleType(), True),
+    StructField("na_sales", DoubleType(), True),
+    StructField("japan_sales", DoubleType(), True),
+    StructField("pal_sales", DoubleType(), True),
+    StructField("other_sales", DoubleType(), True),
+    StructField("user_score", DoubleType(), True),
+    StructField("critic_score", DoubleType(), True)
+])
+
 videoGameSalesDF: DataFrame = spark.read  \
   .option("header", "true") \
   .option("sep", "|") \
-  .option("inferSchema", "true") \
+  .schema(videoGameSales_schema) \
   .csv("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/sales/video_game_sales.csv")
 
+videoGameSalesDF = videoGameSalesDF.select("title", "publisher", "developer", "release_date", "platform", "total_sales", "na_sales")
 filteredDF = videoGameSalesDF.filter((year(videoGameSalesDF.release_date) >= 2006) & (year(videoGameSalesDF.release_date) <= 2015))
 
 bestNAPublisher = filteredDF.groupBy("publisher").sum("na_sales").orderBy("sum(na_sales)", ascending=False).first()["publisher"]
@@ -115,6 +132,7 @@ print(f"The publisher with the highest total video game sales in North America i
 print(f"The number of titles with missing sales data for North America: {titlesWithMissingSalesData}")
 print("Sales data for the publisher:")
 bestNAPublisherSales.show()
+
 
 # COMMAND ----------
 
@@ -172,24 +190,8 @@ eventDF: DataFrame = spark.read  \
   .parquet("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/football/events.parquet")
 eventDF.printSchema()
 
-eventID2NameDF: DataFrame = spark.read  \
-  .option("header", "true") \
-  .option("sep", ",") \
-  .option("inferSchema", "true") \
-  .csv("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/football/metadata/eventid2name.csv")
-eventID2NameDF.printSchema()
-eventID2NameDF.show(10)
-
-tags2NameDF: DataFrame = spark.read  \
-  .option("header", "true") \
-  .option("sep", ",") \
-  .option("inferSchema", "true") \
-  .csv("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/football/metadata/tags2name.csv")
-tags2NameDF.printSchema()
-tags2NameDF.show(10)
-
-row_count = eventDF.count()
-print(f"Number of rows in eventDF: {row_count}")
+eventDF = eventDF.select("eventId", "matchId", "competition", "season", "homeTeam", "awayTeam", "event" ,"eventTeam", "eventTime", "eventPeriod", "tags")
+eventDF.cache()
 
 # COMMAND ----------
 
@@ -238,17 +240,22 @@ matchDF = eventDF.select("matchId", "competition", "season", "homeTeam", "awayTe
 
 matchDF = matchDF.withColumn("totalGoals", col("homeTeamGoals") + col("awayTeamGoals"))
 
-display(matchDF.filter(col("matchId").isin(2499806, 2499920, 2500056, 2500894, 2516792, 2516861, 2565711, 2576132)).select("matchId", "competition", "season", "homeTeam", "awayTeam", "homeTeamGoals", "awayTeamGoals").orderBy("matchId"))
+matchDF.cache()
 
-total_matches = matchDF.count()
-matches_without_goals = matchDF.filter(col("totalGoals") == 0).count()
-most_goals_in_single_game = matchDF.agg(spark_max("totalGoals")).first()[0]
-total_goals = matchDF.agg(sum("totalGoals")).first()[0]
+# for testing purpose
 
-print(f"Total number of matches: {total_matches}")
-print(f"Matches without any goals: {matches_without_goals}")
-print(f"Most goals in total in a single game: {most_goals_in_single_game}")
-print(f"Total amount of goals: {total_goals}")
+# display(matchDF.filter(col("matchId").isin(2499806, 2499920, 2500056, 2500894, 2516792, 2516861, 2565711, 2576132)).select("matchId", "competition", "season", "homeTeam", "awayTeam", "homeTeamGoals", "awayTeamGoals").orderBy("matchId"))
+
+# total_matches = matchDF.count()
+# matches_without_goals = matchDF.filter(col("totalGoals") == 0).count()
+# most_goals_in_single_game = matchDF.agg(max("totalGoals")).first()[0]
+# total_goals = matchDF.agg(sum("totalGoals")).first()[0]
+
+# print(f"Total number of matches: {total_matches}")
+# print(f"Matches without any goals: {matches_without_goals}")
+# print(f"Most goals in total in a single game: {most_goals_in_single_game}")
+# print(f"Total amount of goals: {total_goals}")
+
 
 # COMMAND ----------
 
@@ -330,21 +337,26 @@ seasonDF = homeStatsDF.unionByName(awayStatsDF).groupBy("competition", "season",
     sum("points").alias("points")
 )
 
-display(seasonDF.filter(col("team").isin("Lille", "Getafe", "Torino", "Arsenal", "Schalke 04", "Burnley")))
+seasonDF.cache()
 
-total_rows = seasonDF.count()
-teams_above_70_points = seasonDF.filter(col("points") > 70).count()
-lowest_points = seasonDF.agg(spark_min("points")).first()[0]
-total_points = seasonDF.agg(sum("points")).first()[0]
-total_goals_scored = seasonDF.agg(sum("goalsScored")).first()[0]
-total_goals_conceded = seasonDF.agg(sum("goalsConceded")).first()[0]
+# for testing purpose
 
-print(f"Total number of rows: {total_rows}")
-print(f"Teams with more than 70 points in a season: {teams_above_70_points}")
-print(f"Lowest amount points in a season: {lowest_points}")
-print(f"Total amount of points: {total_points}")
-print(f"Total amount of goals scored: {total_goals_scored}")
-print(f"Total amount of goals conceded: {total_goals_conceded}")
+# display(seasonDF.filter(col("team").isin("Lille", "Getafe", "Torino", "Arsenal", "Schalke 04", "Burnley")))
+
+# total_rows = seasonDF.count()
+# teams_above_70_points = seasonDF.filter(col("points") > 70).count()
+# lowest_points = seasonDF.agg(min("points")).first()[0]
+# total_points = seasonDF.agg(sum("points")).first()[0]
+# total_goals_scored = seasonDF.agg(sum("goalsScored")).first()[0]
+# total_goals_conceded = seasonDF.agg(sum("goalsConceded")).first()[0]
+
+# print(f"Total number of rows: {total_rows}")
+# print(f"Teams with more than 70 points in a season: {teams_above_70_points}")
+# print(f"Lowest amount points in a season: {lowest_points}")
+# print(f"Total amount of points: {total_points}")
+# print(f"Total amount of goals scored: {total_goals_scored}")
+# print(f"Total amount of goals conceded: {total_goals_conceded}")
+
 
 # COMMAND ----------
 
@@ -383,7 +395,7 @@ print(f"Total amount of goals conceded: {total_goals_conceded}")
 
 # COMMAND ----------
 
-englandDF: DataFrame = seasonDF.filter(
+englandDF = seasonDF.filter(
     (col("competition") == "English Premier League") & 
     (col("season") == "2017-2018")
 )
@@ -396,13 +408,13 @@ englandDF = englandDF.withColumn(
     )
 )
 
-englandDF = englandDF.orderBy(
-    col("points").desc(), 
-    (col("goalsScored") - col("goalsConceded")).desc(), 
-    col("goalsScored").desc()
-)
-
-englandDF = englandDF.withColumn("Pos", expr("row_number() over (order by points desc, (goalsScored - goalsConceded) desc, goalsScored desc)"))
+englandDF = englandDF.withColumn("Pos", row_number().over(
+    Window.orderBy(
+        col("points").desc(), 
+        (col("goalsScored") - col("goalsConceded")).desc(), 
+        col("goalsScored").desc()
+    )
+))
 
 englandDF = englandDF.select(
     col("Pos"),
@@ -416,6 +428,7 @@ englandDF = englandDF.select(
     col("GD"),
     col("points").alias("Pts")
 )
+
 print("English Premier League table for season 2017-2018")
 englandDF.show(20, False)
 
@@ -449,17 +462,20 @@ matchPassDF = passEventsDF.groupBy("matchId","eventTeam", "competition", "season
      count("eventId").alias("totalPasses")
 ).withColumnRenamed("eventTeam", "team")
 
-totalRows = matchPassDF.count()
+matchPassDF.cache()
 
-moreThan700TotalPasses = matchPassDF.filter(col("totalPasses") > 700).count()
+# for testing purpose
+# totalRows = matchPassDF.count()
 
-moreThan600SuccessfulPasses = matchPassDF.filter(col("successfulPasses") > 600).count()
+# moreThan700TotalPasses = matchPassDF.filter(col("totalPasses") > 700).count()
 
-print(f"Total number of rows: {totalRows}")
-print(f"Team-match pairs with more than 700 total passes: {moreThan700TotalPasses}")
-print(f"Team-match pairs with more than 600 successful passes: {moreThan600SuccessfulPasses}")
+# moreThan600SuccessfulPasses = matchPassDF.filter(col("successfulPasses") > 600).count()
 
-display(matchPassDF)
+# print(f"Total number of rows: {totalRows}")
+# print(f"Team-match pairs with more than 700 total passes: {moreThan700TotalPasses}")
+# print(f"Team-match pairs with more than 600 successful passes: {moreThan600SuccessfulPasses}")
+
+# display(matchPassDF)
 
 # COMMAND ----------
 
@@ -535,7 +551,7 @@ sortedLowestPassSuccessRatioDF.show(5, False)
 
 seasonStatsDF = seasonDF.filter(col("season") == "2017-2018")
 
-seasonStatsDF = seasonStatsDF.join(avgPassSuccessRatioDF, on=["competition", "team"], how="inner")
+seasonStatsDF = seasonStatsDF.join(broadcast(avgPassSuccessRatioDF), on=["competition", "team"], how="inner")
 
 seasonStatsDF = seasonStatsDF.withColumn("Avg", round(col("points") / col("games"), 2))
 
@@ -558,9 +574,8 @@ bestDF = top2TeamsDF.select(
     concat(lit("+"), col("points")).alias("Pts"),
     col("Avg"),
     col("passSuccessRatio").alias("PassRatio")
-).orderBy(col("PassRatio").desc())
+).orderBy(col("Avg").desc())
 
-print("The top 2 teams for each league in season 2017-2018 sorted by pass success ratio")
 bestDF.show(10, False)
 
 # COMMAND ----------
@@ -592,7 +607,7 @@ bestDF.show(10, False)
 # MAGIC
 # MAGIC For the basic tasks, we sat in a room and did all the tasks together. It took us around 4 hours to complete them.
 # MAGIC
-# MAGIC While doing the assignment, we used Databricks AI assistent to help us diagnose the errors and search for syntax.
+# MAGIC While doing the assignment, we used Databricks AI assistant to help us diagnose the errors and search for syntax.
 # MAGIC
 # MAGIC We did not work with any students outside our group.
 
@@ -618,9 +633,9 @@ bestDF.show(10, False)
 # MAGIC %md
 # MAGIC ##### If you did the advanced tasks 2-4, mark here which of the two should be considered in grading:
 # MAGIC
-# MAGIC - Advanced task 2 should be graded: ???
-# MAGIC - Advanced task 3 should be graded: ???
-# MAGIC - Advanced task 4 should be graded: ???
+# MAGIC - Advanced task 2 should be graded: Yes
+# MAGIC - Advanced task 3 should be graded: No
+# MAGIC - Advanced task 4 should be graded: Yes
 
 # COMMAND ----------
 
@@ -647,6 +662,20 @@ bestDF.show(10, False)
 # MAGIC Note, that you should not do the basic tasks again for this additional task, but instead modify your basic task code with more efficient versions.
 # MAGIC
 # MAGIC You can create a text cell below this one and describe what optimizations you have done. This might help the grader to better recognize how skilled your work with the basic tasks has been.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC The optimizations focus on the following improvements:
+# MAGIC
+# MAGIC - Used more concise filtering and transformation logic to reduce redundancy and improve readability.
+# MAGIC - Applied column selection (select) at the earliest stages to avoid carrying unnecessary data.
+# MAGIC - Leveraged Spark's Window functionality and caching strategically to improve computation speed, particularly for ranking and aggregation tasks.
+# MAGIC - Refactored column computations like goal differences and pass ratios to avoid repetitive expressions and improve clarity.
+# MAGIC - Frequent use of .cache() in intermediate steps ensures that Spark does not recompute expensive transformations multiple times.
+# MAGIC - Reorganized and documented transformations to make the logic clearer and easier to understand.
+# MAGIC - Used consistent naming conventions for variables and data frames, which simplifies debugging.
+# MAGIC
 
 # COMMAND ----------
 
@@ -752,17 +781,177 @@ bestDF.show(10, False)
 
 # COMMAND ----------
 
-mostMinutesDF: DataFrame = ???
+# Read the data
+matchesDF = spark.read.parquet("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/football/matches.parquet")
+playersDF = spark.read.parquet("abfss://shared@tunics320f2024gen2.dfs.core.windows.net/assignment/football/players.parquet")
 
-print("The players with the most minutes played in season 2017-2018 for each player role:")
+# Filter for second half events and calculate the match length
+secondHalfEventsDF = eventDF.filter(col("eventPeriod") == "2H")
+lastEventTimeDF = secondHalfEventsDF.groupBy("matchId").agg(max("eventTime").alias("lastEventTime"))
+matchLengthsDF = lastEventTimeDF.withColumn("matchLength", 45 + ceil(col("lastEventTime") / 60))
+
+# Join matchLengthsDF with matchesDF to include matchLength column
+matchesWithLengthDF = matchesDF.join(matchLengthsDF, "matchId", "left")
+
+# Explode the lineup arrays to get individual player records
+def get_players_df(team_col):
+    return matchesWithLengthDF.select(
+        col("matchId"),
+        col("competition"),
+        col("season"),
+        col(f"{team_col}.team").alias("playerTeam"),
+        col(f"{team_col}.lineup").alias("lineup"),
+        col(f"{team_col}.bench").alias("bench"),
+        col(f"{team_col}.substitution1"),
+        col(f"{team_col}.substitution2"),
+        col(f"{team_col}.substitution3"),
+        col("matchLength")
+    ).withColumn("playerId", explode(col("lineup")))
+
+homePlayersDF = get_players_df("homeTeamData")
+awayPlayersDF = get_players_df("awayTeamData")
+
+# Combine home and away players
+allPlayersDF = homePlayersDF.union(awayPlayersDF)
+
+# Calculate start and end minutes for each player
+allPlayersDF = allPlayersDF.withColumn("startMinute", lit(0)).withColumn("endMinute", col("matchLength"))
+
+# Adjust end minutes based on substitutions
+for i in range(1, 4):
+    allPlayersDF = allPlayersDF.withColumn(
+        "endMinute",
+        when(col(f"substitution{i}.playerOut") == col("playerId"), col(f"substitution{i}.minute")).otherwise(col("endMinute"))
+    )
+
+# Calculate minutes played for starting players
+allPlayersDF = allPlayersDF.withColumn("minutes", col("endMinute") - col("startMinute"))
+# Calculate minutes played for substituted-in players
+def get_substituted_in_df(team_col):
+    return matchesWithLengthDF.select(
+        col("matchId"),
+        col("competition"),
+        col("season"),
+        col(f"{team_col}.team").alias("playerTeam"),
+        col(f"{team_col}.substitution1.playerIn").alias("playerId"),
+        col(f"{team_col}.substitution1.minute").alias("startMinute"),
+        col("matchLength")
+    ).union(
+        matchesWithLengthDF.select(
+            col("matchId"),
+            col("competition"),
+            col("season"),
+            col(f"{team_col}.team").alias("playerTeam"),
+            col(f"{team_col}.substitution2.playerIn").alias("playerId"),
+            col(f"{team_col}.substitution2.minute").alias("startMinute"),
+            col("matchLength")
+        )
+    ).union(
+        matchesWithLengthDF.select(
+            col("matchId"),
+            col("competition"),
+            col("season"),
+            col(f"{team_col}.team").alias("playerTeam"),
+            col(f"{team_col}.substitution3.playerIn").alias("playerId"),
+            col(f"{team_col}.substitution3.minute").alias("startMinute"),
+            col("matchLength")
+        )
+    )
+
+homeSubstitutedInDF = get_substituted_in_df("homeTeamData")
+awaySubstitutedInDF = get_substituted_in_df("awayTeamData")
+
+substitutedInDF = homeSubstitutedInDF.union(awaySubstitutedInDF)
+
+substitutedInDF = substitutedInDF.withColumn("endMinute", col("matchLength"))
+substitutedInDF = substitutedInDF.withColumn("minutes", col("endMinute") - col("startMinute"))
+
+# Ensure both DataFrames have the same columns before union
+substitutedInDF = substitutedInDF.select("matchId", "playerId", "competition", "season", "playerTeam", "startMinute", "endMinute", "minutes")
+
+# Combine the minutes played by starting players and substituted-in players
+allPlayersDF = allPlayersDF.select("matchId", "playerId", "competition", "season", "playerTeam", "startMinute", "endMinute", "minutes").union(substitutedInDF)
+
+# Select relevant columns
+playersTimeOnPitchDF = allPlayersDF.select(
+    "matchId", "playerId", "competition", "season", "playerTeam", "startMinute", "endMinute", "minutes"
+)
+
+# Calculate total minutes played for each player
+totalMinutesDF = playersTimeOnPitchDF.groupBy("playerId").agg(sum("minutes").alias("minutes"))
+
+# Join with players data to get player details
+playerMinutesDF = totalMinutesDF.join(playersDF, "playerId").select(
+    col("role"),
+    concat_ws(" ", col("firstName"), col("lastName")).alias("player"),
+    col("birthArea"),
+    col("minutes")
+)
+
+# Get the player with the most minutes played for each role
+windowSpec = Window.partitionBy("role").orderBy(col("minutes").desc())
+
+mostMinutesDF = playerMinutesDF.withColumn("rank", row_number().over(windowSpec)).filter(col("rank") == 1).drop("rank")
+
+# Sort by minutes in descending order
+mostMinutesDF = mostMinutesDF.orderBy(col("minutes").desc())
+
+# Display the result
 mostMinutesDF.show(truncate=False)
 
 # COMMAND ----------
 
-topPlayers: DataFrame = ???
+from pyspark.sql.functions import array_contains, when, col, lit, expr, concat
 
-print("The players with higher than +65 for the plus-minus statistics in season 2017-2018:")
-topPlayers.show(truncate=False)
+goalEventsDF = eventDF.filter(
+    array_contains(col("tags"), "Goal") & array_contains(col("tags"), "Accurate") |
+    array_contains(col("tags"), "Own goal") 
+).select(
+    "eventId", "matchId", "eventTime", "eventPeriod", "eventTeam", "homeTeam", "awayTeam", "tags"
+).withColumn(
+    "goalTeam",
+    when(
+        array_contains(col("tags"), "Own goal"),
+        # If "Own goal", flip to the opposing team
+        when(col("eventTeam") == col("homeTeam"), col("awayTeam")).otherwise(col("homeTeam"))
+    ).otherwise(
+        # Otherwise, retain the event team as the goalTeam
+        col("eventTeam")
+    )
+)
+goalEventsDF = goalEventsDF.withColumn("eventTime", (col("eventTime") / 60).cast("double"))
+goalImpactDF = goalEventsDF.join(playersTimeOnPitchDF, "matchId").filter(
+    (
+        (col("eventPeriod") == "1H") &
+        (col("eventTime") >= col("startMinute")) &
+        (col("eventTime") <= col("endMinute"))
+    ) |
+    (
+        (col("eventPeriod") == "2H") &
+        ((col("eventTime") + 45) >= col("startMinute")) &
+        ((col("eventTime") + 45) <= col("endMinute"))
+    )
+)
+goalImpactDF = goalImpactDF.withColumn(
+    "playerPlusMinus",
+    when(col("goalTeam") == col("playerTeam"), 1).otherwise(-1)
+)
+# Aggregate total plus-minus per player for season 2017-2018
+plusMinusDF = goalImpactDF.groupBy("playerId", "season").agg(
+    sum("playerPlusMinus").alias("plusMinus")
+).filter(col("season") == "2017-2018")
+
+# Join with playersDF to get player details
+topPlayersDF = plusMinusDF.join(playersDF, "playerId").filter(
+    col("plusMinus") > 65
+).select(
+    concat_ws(" ", col("firstName"), col("lastName")).alias("player"),
+    col("birthArea"),
+    col("role"),
+    col("plusMinus")
+).orderBy(col("plusMinus").desc())
+
+topPlayersDF.show(truncate=False)
 
 # COMMAND ----------
 
